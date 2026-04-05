@@ -86,16 +86,13 @@ app.post('/api/register', async (req, res) => {
     try {
         const { name, email, password, role } = req.body;
 
-        // Check if user exists
         const existingUser = await User.findOne({ where: { email } });
         if (existingUser) {
             return res.status(400).json({ error: 'User with this email already exists' });
         }
 
-        // Hash password
         const hashedPassword = await bcrypt.hash(password, 10);
 
-        // Create user
         const newUser = await User.create({
             name,
             email,
@@ -103,7 +100,6 @@ app.post('/api/register', async (req, res) => {
             role: role || 'employee'
         });
 
-        // Create JWT
         const token = jwt.sign(
             {
                 id: newUser.id,
@@ -112,7 +108,7 @@ app.post('/api/register', async (req, res) => {
                 role: newUser.role
             },
             process.env.JWT_SECRET,
-            { expiresIn: process.env.JWT_EXPIRES_IN }
+            { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
         );
 
         res.status(201).json({
@@ -125,7 +121,6 @@ app.post('/api/register', async (req, res) => {
                 role: newUser.role
             }
         });
-
     } catch (error) {
         console.error('Error registering user:', error);
         res.status(500).json({ error: 'Failed to register user' });
@@ -155,7 +150,7 @@ app.post('/api/login', async (req, res) => {
                 role: user.role
             },
             process.env.JWT_SECRET,
-            { expiresIn: process.env.JWT_EXPIRES_IN }
+            { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
         );
 
         res.json({
@@ -168,7 +163,6 @@ app.post('/api/login', async (req, res) => {
                 role: user.role
             }
         });
-
     } catch (error) {
         console.error('Error logging in user:', error);
         res.status(500).json({ error: 'Failed to login' });
@@ -216,18 +210,54 @@ app.get('/api/users', requireAuth, requireAdmin, async (req, res) => {
 
 // PROJECT ROUTES
 
-// GET /api/projects - Get projects
+// GET /api/projects - Employees only see projects with tasks assigned to them
 app.get('/api/projects', requireAuth, async (req, res) => {
     try {
-        const projects = await Project.findAll({
-            include: [
-                {
-                    model: User,
-                    as: 'manager',
-                    attributes: ['id', 'name', 'email', 'role']
-                }
-            ]
-        });
+        let projects;
+
+        if (req.user.role === 'employee') {
+            projects = await Project.findAll({
+                include: [
+                    {
+                        model: User,
+                        as: 'manager',
+                        attributes: ['id', 'name', 'email', 'role']
+                    },
+                    {
+                        model: Task,
+                        where: { assignedUserId: req.user.id },
+                        required: true,
+                        include: [
+                            {
+                                model: User,
+                                as: 'assignedUser',
+                                attributes: ['id', 'name', 'email', 'role']
+                            }
+                        ]
+                    }
+                ]
+            });
+        } else {
+            projects = await Project.findAll({
+                include: [
+                    {
+                        model: User,
+                        as: 'manager',
+                        attributes: ['id', 'name', 'email', 'role']
+                    },
+                    {
+                        model: Task,
+                        include: [
+                            {
+                                model: User,
+                                as: 'assignedUser',
+                                attributes: ['id', 'name', 'email', 'role']
+                            }
+                        ]
+                    }
+                ]
+            });
+        }
 
         res.json(projects);
     } catch (error) {
@@ -236,31 +266,58 @@ app.get('/api/projects', requireAuth, async (req, res) => {
     }
 });
 
-// GET /api/projects/:id - Get single project
+// GET /api/projects/:id - Employee can only view project if assigned to a task in it
 app.get('/api/projects/:id', requireAuth, async (req, res) => {
     try {
-        const project = await Project.findByPk(req.params.id, {
-            include: [
-                {
-                    model: User,
-                    as: 'manager',
-                    attributes: ['id', 'name', 'email', 'role']
-                },
-                {
-                    model: Task,
-                    include: [
-                        {
-                            model: User,
-                            as: 'assignedUser',
-                            attributes: ['id', 'name', 'email', 'role']
-                        }
-                    ]
-                }
-            ]
-        });
+        let project;
+
+        if (req.user.role === 'employee') {
+            project = await Project.findOne({
+                where: { id: req.params.id },
+                include: [
+                    {
+                        model: User,
+                        as: 'manager',
+                        attributes: ['id', 'name', 'email', 'role']
+                    },
+                    {
+                        model: Task,
+                        where: { assignedUserId: req.user.id },
+                        required: true,
+                        include: [
+                            {
+                                model: User,
+                                as: 'assignedUser',
+                                attributes: ['id', 'name', 'email', 'role']
+                            }
+                        ]
+                    }
+                ]
+            });
+        } else {
+            project = await Project.findByPk(req.params.id, {
+                include: [
+                    {
+                        model: User,
+                        as: 'manager',
+                        attributes: ['id', 'name', 'email', 'role']
+                    },
+                    {
+                        model: Task,
+                        include: [
+                            {
+                                model: User,
+                                as: 'assignedUser',
+                                attributes: ['id', 'name', 'email', 'role']
+                            }
+                        ]
+                    }
+                ]
+            });
+        }
 
         if (!project) {
-            return res.status(404).json({ error: 'Project not found' });
+            return res.status(404).json({ error: 'Project not found or access denied' });
         }
 
         res.json(project);
@@ -331,19 +388,37 @@ app.delete('/api/projects/:id', requireAuth, requireAdmin, async (req, res) => {
 
 // TASK ROUTES
 
-// GET /api/projects/:id/tasks - Get tasks for a project
+// GET /api/projects/:id/tasks - Employee only sees own tasks in that project
 app.get('/api/projects/:id/tasks', requireAuth, async (req, res) => {
     try {
-        const tasks = await Task.findAll({
-            where: { projectId: req.params.id },
-            include: [
-                {
-                    model: User,
-                    as: 'assignedUser',
-                    attributes: ['id', 'name', 'email', 'role']
-                }
-            ]
-        });
+        let tasks;
+
+        if (req.user.role === 'employee') {
+            tasks = await Task.findAll({
+                where: {
+                    projectId: req.params.id,
+                    assignedUserId: req.user.id
+                },
+                include: [
+                    {
+                        model: User,
+                        as: 'assignedUser',
+                        attributes: ['id', 'name', 'email', 'role']
+                    }
+                ]
+            });
+        } else {
+            tasks = await Task.findAll({
+                where: { projectId: req.params.id },
+                include: [
+                    {
+                        model: User,
+                        as: 'assignedUser',
+                        attributes: ['id', 'name', 'email', 'role']
+                    }
+                ]
+            });
+        }
 
         res.json(tasks);
     } catch (error) {
@@ -373,22 +448,42 @@ app.post('/api/projects/:id/tasks', requireAuth, requireManager, async (req, res
     }
 });
 
-// PUT /api/tasks/:id - Update task
+// PUT /api/tasks/:id - Employee can only update own task status
 app.put('/api/tasks/:id', requireAuth, async (req, res) => {
     try {
-        const { title, description, status, priority } = req.body;
+        const task = await Task.findByPk(req.params.id);
 
-        const [updatedRowsCount] = await Task.update(
-            { title, description, status, priority },
-            { where: { id: req.params.id } }
-        );
-
-        if (updatedRowsCount === 0) {
+        if (!task) {
             return res.status(404).json({ error: 'Task not found' });
         }
 
-        const updatedTask = await Task.findByPk(req.params.id);
-        res.json(updatedTask);
+        if (req.user.role === 'employee') {
+            if (task.assignedUserId !== req.user.id) {
+                return res.status(403).json({
+                    error: 'Forbidden. You can only update your own tasks.'
+                });
+            }
+
+            const { status } = req.body;
+
+            await task.update({
+                status: status ?? task.status
+            });
+
+            return res.json(task);
+        }
+
+        const { title, description, status, priority, assignedUserId } = req.body;
+
+        await task.update({
+            title: title ?? task.title,
+            description: description ?? task.description,
+            status: status ?? task.status,
+            priority: priority ?? task.priority,
+            assignedUserId: assignedUserId ?? task.assignedUserId
+        });
+
+        res.json(task);
     } catch (error) {
         console.error('Error updating task:', error);
         res.status(500).json({ error: 'Failed to update task' });
